@@ -19,6 +19,8 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
+  BarChart,
+  Bar,
 } from "recharts";
 
 interface SPARQLBinding {
@@ -116,24 +118,34 @@ interface DataZone {
   Country_Name: string;
 }
 
+interface Ward {
+  name: string;
+  code: string;
+  datazones: Array<{
+    code: string;
+    name: string;
+  }>;
+}
+
+interface Council {
+  name: string;
+  wards: {
+    [key: string]: Ward;
+  };
+}
+
 interface GeographyHierarchy {
   [key: string]: {
     name: string;
     councils: {
-      [key: string]: {
-        name: string;
-        wards: {
-          [key: string]: {
-            name: string;
-            datazones: {
-              code: string;
-              name: string;
-            }[];
-          };
-        };
-      };
+      [key: string]: Council;
     };
   };
+}
+
+interface WardPriceComparison {
+  wardName: string;
+  meanPrice: number;
 }
 
 const ScottishHousingDashboard = () => {
@@ -145,6 +157,9 @@ const ScottishHousingDashboard = () => {
     selectedCountry: "S92000003", // Scotland by default
   });
   const [geographyData, setGeographyData] = useState<GeographyHierarchy>({});
+  const [wardComparison, setWardComparison] = useState<WardPriceComparison[]>(
+    []
+  );
 
   const areas = [
     { id: "S12000033", name: "Glasgow City" },
@@ -292,6 +307,100 @@ const ScottishHousingDashboard = () => {
     }
   };
 
+  const fetchWardComparisonData = async () => {
+    try {
+      const selectedCountry = geographyData["S92000003"];
+      if (!selectedCountry?.councils) {
+        console.log("No country data found");
+        return;
+      }
+
+      const council = selectedCountry.councils[areaSelections.selectedCouncil];
+      if (!council) {
+        console.log("No council data found");
+        return;
+      }
+
+      console.log("Fetching data for wards:", Object.keys(council.wards));
+
+      const wardPromises = Object.entries(council.wards).map(
+        async ([wardCode, ward]: [string, Ward]) => {
+          const query = `
+            PREFIX qb: <http://purl.org/linked-data/cube#>
+            PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+            PREFIX sdmx: <http://purl.org/linked-data/sdmx/2009/dimension#>
+            PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+            
+            SELECT ?period ?value ?measure
+            WHERE {
+              ?obs qb:dataSet <http://statistics.gov.scot/data/residential-properties-sales-and-price> ;
+                   sdmx:refArea <http://statistics.gov.scot/id/statistical-geography/${wardCode}> ;
+                   sdmx:refPeriod ?period ;
+                   qb:measureType ?measure ;
+                   ?measure ?value .
+            }
+            ORDER BY ?period
+          `;
+
+          console.log(`Fetching data for ward ${wardCode} (${ward.name})`);
+
+          try {
+            const formData = new FormData();
+            formData.append("query", query);
+
+            const response = await fetch("/api/sparql", {
+              method: "POST",
+              body: formData,
+            });
+
+            if (!response.ok) {
+              console.error(
+                `SPARQL request failed for ward ${wardCode}:`,
+                await response.text()
+              );
+              return null;
+            }
+
+            const data = await response.json();
+            console.log(`Data received for ward ${wardCode}:`, data);
+
+            // Find the most recent mean price
+            const measures = data.results.bindings;
+            const meanPrices = measures.filter(
+              (m) =>
+                m.measure.value ===
+                "http://statistics.gov.scot/def/measure-properties/mean"
+            );
+            const latestMeanPrice =
+              meanPrices[meanPrices.length - 1]?.value?.value;
+
+            return {
+              wardName: ward.name,
+              meanPrice: latestMeanPrice ? parseFloat(latestMeanPrice) : 0,
+            };
+          } catch (error) {
+            console.error(`Error fetching data for ward ${wardCode}:`, error);
+            return null;
+          }
+        }
+      );
+
+      const results = await Promise.all(wardPromises);
+      console.log("All ward results:", results);
+
+      const validResults = results.filter(
+        (result): result is WardPriceComparison =>
+          result !== null && result.meanPrice > 0
+      );
+
+      console.log("Valid ward results:", validResults);
+      setWardComparison(validResults.sort((a, b) => b.meanPrice - a.meanPrice));
+    } catch (error) {
+      console.error("Error fetching ward comparison data:", error);
+      setWardComparison([]);
+    }
+  };
+
   useEffect(() => {
     if (selectedArea) {
       fetchPriceData(selectedArea);
@@ -340,10 +449,10 @@ const ScottishHousingDashboard = () => {
           }
 
           const [
-            DZ22_Code,
-            DZ22_Name,
             ,
             ,
+            IZ22_Code,
+            IZ22_Name,
             MMWard_Code,
             MMWard_Name,
             LA_Code,
@@ -411,16 +520,23 @@ const ScottishHousingDashboard = () => {
           if (!hierarchy[Country_Code].councils[LA_Code].wards[MMWard_Code]) {
             hierarchy[Country_Code].councils[LA_Code].wards[MMWard_Code] = {
               name: MMWard_Name,
+              code: MMWard_Code,
               datazones: [],
             };
           }
 
-          hierarchy[Country_Code].councils[LA_Code].wards[
-            MMWard_Code
-          ].datazones.push({
-            code: DZ22_Code,
-            name: DZ22_Name,
-          });
+          const existingDatazone = hierarchy[Country_Code].councils[
+            LA_Code
+          ].wards[MMWard_Code].datazones.find((dz) => dz.code === IZ22_Code);
+
+          if (!existingDatazone) {
+            hierarchy[Country_Code].councils[LA_Code].wards[
+              MMWard_Code
+            ].datazones.push({
+              code: IZ22_Code,
+              name: IZ22_Name,
+            });
+          }
         });
 
         console.log("Processing summary:", {
@@ -454,6 +570,12 @@ const ScottishHousingDashboard = () => {
 
     fetchGeographyData();
   }, []);
+
+  useEffect(() => {
+    if (areaSelections.selectedCouncil) {
+      fetchWardComparisonData();
+    }
+  }, [areaSelections.selectedCouncil, geographyData]);
 
   return (
     <div className="container mx-auto p-4">
@@ -508,7 +630,10 @@ const ScottishHousingDashboard = () => {
           <Select
             value={areaSelections.selectedWard}
             onValueChange={(value) => {
-              setAreaSelections((prev) => ({ ...prev, selectedWard: value }));
+              setAreaSelections((prev) => ({
+                ...prev,
+                selectedWard: value,
+              }));
               setSelectedArea(value);
             }}
           >
@@ -615,6 +740,88 @@ const ScottishHousingDashboard = () => {
               </div>
             </CardContent>
           </Card>
+
+          {areaSelections.selectedCouncil && wardComparison.length > 0 && (
+            <Card className="col-span-2">
+              <CardHeader>
+                <CardTitle>
+                  {
+                    geographyData[areaSelections.selectedCountry]?.councils[
+                      areaSelections.selectedCouncil
+                    ]?.name
+                  }{" "}
+                  - Ward Mean House Prices (2023)
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="h-[600px] -mx-4">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={wardComparison}
+                      layout="vertical"
+                      margin={{ top: 5, right: 30, left: 200, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis
+                        type="number"
+                        tickFormatter={(value) => `£${value.toLocaleString()}`}
+                      />
+                      <YAxis
+                        type="category"
+                        dataKey="wardName"
+                        width={180}
+                        tick={{ fontSize: 12 }}
+                      />
+                      <Tooltip
+                        formatter={(value) =>
+                          `£${parseInt(value.toString()).toLocaleString()}`
+                        }
+                      />
+                      <Bar
+                        dataKey="meanPrice"
+                        fill="#8884d8"
+                        name="Mean Price"
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {areaSelections.selectedWard && (
+            <Card className="col-span-2">
+              <CardHeader>
+                <CardTitle>
+                  Datazones in{" "}
+                  {
+                    geographyData[areaSelections.selectedCountry]?.councils[
+                      areaSelections.selectedCouncil
+                    ]?.wards[areaSelections.selectedWard]?.name
+                  }
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {geographyData[areaSelections.selectedCountry]?.councils[
+                    areaSelections.selectedCouncil
+                  ]?.wards[areaSelections.selectedWard]?.datazones.map(
+                    (datazone, index) => (
+                      <div
+                        key={`${datazone.code}-${index}`}
+                        className="p-3 bg-muted rounded-lg flex justify-between items-center"
+                      >
+                        <span className="font-medium">{datazone.name}</span>
+                        <span className="text-sm text-muted-foreground">
+                          {datazone.code}
+                        </span>
+                      </div>
+                    )
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          )}
         </div>
       </div>
     </div>
