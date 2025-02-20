@@ -146,6 +146,9 @@ interface GeographyHierarchy {
 interface WardPriceComparison {
   wardName: string;
   meanPrice: number;
+  medianPrice: number;
+  lowerQuartile: number;
+  upperQuartile: number;
 }
 
 const ScottishHousingDashboard = () => {
@@ -321,8 +324,6 @@ const ScottishHousingDashboard = () => {
         return;
       }
 
-      console.log("Fetching data for wards:", Object.keys(council.wards));
-
       const wardPromises = Object.entries(council.wards).map(
         async ([wardCode, ward]: [string, Ward]) => {
           const query = `
@@ -342,8 +343,6 @@ const ScottishHousingDashboard = () => {
             ORDER BY ?period
           `;
 
-          console.log(`Fetching data for ward ${wardCode} (${ward.name})`);
-
           try {
             const formData = new FormData();
             formData.append("query", query);
@@ -362,21 +361,51 @@ const ScottishHousingDashboard = () => {
             }
 
             const data = await response.json();
-            console.log(`Data received for ward ${wardCode}:`, data);
-
-            // Find the most recent mean price
             const measures = data.results.bindings;
-            const meanPrices = measures.filter(
-              (m) =>
-                m.measure.value ===
-                "http://statistics.gov.scot/def/measure-properties/mean"
-            );
-            const latestMeanPrice =
-              meanPrices[meanPrices.length - 1]?.value?.value;
+
+            // Get the latest values for each measure
+            const latestMean = measures
+              .filter(
+                (m) =>
+                  m.measure.value ===
+                  "http://statistics.gov.scot/def/measure-properties/mean"
+              )
+              .pop()?.value?.value;
+
+            const latestMedian = measures
+              .filter(
+                (m) =>
+                  m.measure.value ===
+                  "http://statistics.gov.scot/def/measure-properties/median"
+              )
+              .pop()?.value?.value;
+
+            const latestLowerQuartile = measures
+              .filter(
+                (m) =>
+                  m.measure.value ===
+                  "http://statistics.gov.scot/def/measure-properties/lower-quartile"
+              )
+              .pop()?.value?.value;
+
+            const latestUpperQuartile = measures
+              .filter(
+                (m) =>
+                  m.measure.value ===
+                  "http://statistics.gov.scot/def/measure-properties/upper-quartile"
+              )
+              .pop()?.value?.value;
 
             return {
               wardName: ward.name,
-              meanPrice: latestMeanPrice ? parseFloat(latestMeanPrice) : 0,
+              meanPrice: latestMean ? parseFloat(latestMean) : 0,
+              medianPrice: latestMedian ? parseFloat(latestMedian) : 0,
+              lowerQuartile: latestLowerQuartile
+                ? parseFloat(latestLowerQuartile)
+                : 0,
+              upperQuartile: latestUpperQuartile
+                ? parseFloat(latestUpperQuartile)
+                : 0,
             };
           } catch (error) {
             console.error(`Error fetching data for ward ${wardCode}:`, error);
@@ -386,14 +415,15 @@ const ScottishHousingDashboard = () => {
       );
 
       const results = await Promise.all(wardPromises);
-      console.log("All ward results:", results);
-
       const validResults = results.filter(
         (result): result is WardPriceComparison =>
-          result !== null && result.meanPrice > 0
+          result !== null &&
+          result.meanPrice > 0 &&
+          result.medianPrice > 0 &&
+          result.lowerQuartile > 0 &&
+          result.upperQuartile > 0
       );
 
-      console.log("Valid ward results:", validResults);
       setWardComparison(validResults.sort((a, b) => b.meanPrice - a.meanPrice));
     } catch (error) {
       console.error("Error fetching ward comparison data:", error);
@@ -750,7 +780,7 @@ const ScottishHousingDashboard = () => {
                       areaSelections.selectedCouncil
                     ]?.name
                   }{" "}
-                  - Ward Mean House Prices (2023)
+                  - Ward House Prices Distribution
                 </CardTitle>
               </CardHeader>
               <CardContent>
@@ -781,6 +811,21 @@ const ScottishHousingDashboard = () => {
                         dataKey="meanPrice"
                         fill="#8884d8"
                         name="Mean Price"
+                      />
+                      <Bar
+                        dataKey="medianPrice"
+                        fill="#82ca9d"
+                        name="Median Price"
+                      />
+                      <Bar
+                        dataKey="upperQuartile"
+                        fill="#ffc658"
+                        name="Upper Quartile"
+                      />
+                      <Bar
+                        dataKey="lowerQuartile"
+                        fill="#ff7300"
+                        name="Lower Quartile"
                       />
                     </BarChart>
                   </ResponsiveContainer>
